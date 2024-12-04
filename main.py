@@ -2,8 +2,29 @@ import streamlit as st
 import pandas as pd
 import pyreadstat
 from functools import reduce
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Caching the file loading function to optimize performance
+# Set Streamlit page configuration
+st.set_page_config(
+    page_title="Longitudinal Data Merger",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Initialize session state variables
+if 'data_frames' not in st.session_state:
+    st.session_state['data_frames'] = []
+if 'file_names' not in st.session_state:
+    st.session_state['file_names'] = []
+if 'wave_assignments' not in st.session_state:
+    st.session_state['wave_assignments'] = {}
+if 'merged_df' not in st.session_state:
+    st.session_state['merged_df'] = None
+if 'merge_type' not in st.session_state:
+    st.session_state['merge_type'] = None
+
+# Function to load files based on format
 @st.cache_data
 def load_file(file):
     try:
@@ -18,18 +39,34 @@ def load_file(file):
         
         # Strip leading/trailing spaces from column names
         df.columns = df.columns.str.strip()
+        
+        # Apply filtering if 'Status' and 'Finished' columns exist
+        if 'Status' in df.columns and 'Finished' in df.columns:
+            df = df.query('Status == 0 and Finished == 1')
+        
         return df
     except Exception as e:
         st.error(f"Error loading file `{file.name}`: {e}")
         return None
 
-# Caching the merge function for wide merge
+# Function to remove duplicate primary keys within each dataset
+def remove_duplicates(data_frames, primary_key):
+    cleaned_dfs = []
+    for i, df in enumerate(data_frames, start=1):
+        if primary_key and primary_key in df.columns:
+            if df.duplicated(subset=[primary_key]).any():
+                st.warning(f"⚠️ Dataset {i} contains duplicate `{primary_key}` entries. Duplicates will be removed.")
+                df = df.drop_duplicates(subset=[primary_key])
+        cleaned_dfs.append(df)
+    return cleaned_dfs
+
+# Function to merge datasets in wide format
 @st.cache_data
-def merge_datasets_wide(data_frames, primary_key, join_type):
+def merge_datasets_wide(data_frames, primary_key, join_type, wave_assignments):
     renamed_dfs = []
     for i, df in enumerate(data_frames, start=1):
         df_renamed = df.copy()
-        suffix = f"_w{i}"
+        suffix = f"_w{wave_assignments[i]}"
         # Rename columns except primary key with wave-specific suffixes
         new_columns = {
             col: f"{col}{suffix}" if col != primary_key else col for col in df_renamed.columns
@@ -37,19 +74,19 @@ def merge_datasets_wide(data_frames, primary_key, join_type):
         df_renamed.rename(columns=new_columns, inplace=True)
         renamed_dfs.append(df_renamed)
     
-    # Perform inner join across all dataframes
+    # Perform the merge using the specified join type
     merged_df = reduce(
         lambda left, right: pd.merge(left, right, on=primary_key, how=join_type),
         renamed_dfs
     )
     return merged_df
 
-# Caching the merge function for long merge
+# Function to merge datasets in long format
 @st.cache_data
-def merge_datasets_long(data_frames, primary_key):
+def merge_datasets_long(data_frames, primary_key, wave_assignments):
     # Add 'Wave' identifier to each dataframe
     for i, df in enumerate(data_frames, start=1):
-        df['Wave'] = f"w{i}"
+        df['Wave'] = f"w{wave_assignments[i]}"
     
     # Concatenate all dataframes vertically
     concatenated_df = pd.concat(data_frames, ignore_index=True)
@@ -61,16 +98,6 @@ def merge_datasets_long(data_frames, primary_key):
     merged_df = concatenated_df[concatenated_df[primary_key].isin(common_ids)]
     
     return merged_df, len(common_ids)
-
-# Function to remove duplicate primary keys within each dataset
-def remove_duplicates(data_frames, primary_key):
-    cleaned_dfs = []
-    for i, df in enumerate(data_frames, start=1):
-        if df.duplicated(subset=[primary_key]).any():
-            st.warning(f"⚠️ Dataset {i} contains duplicate `{primary_key}` entries. Duplicates will be removed.")
-            df = df.drop_duplicates(subset=[primary_key])
-        cleaned_dfs.append(df)
-    return cleaned_dfs
 
 # App title and description
 st.title("📊 Longitudinal Data Merger")
@@ -87,58 +114,69 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-# Load datasets
-data_frames = []
-file_names = []
+# Handle file uploads
 if uploaded_files:
+    with st.sidebar.expander("🗂 Assign Wave Numbers"):
+        wave_assignments = {}
+        for i, file in enumerate(uploaded_files, start=1):
+            wave_number = st.number_input(
+                f"Wave number for `{file.name}`:",
+                min_value=1,
+                step=1,
+                key=f"wave_{i}"
+            )
+            wave_assignments[i] = wave_number
+        st.session_state['wave_assignments'] = wave_assignments
+    
+    # Load datasets
     with st.spinner('Loading datasets...'):
-        for file in uploaded_files:
+        data_frames = []
+        file_names = []
+        for i, file in enumerate(uploaded_files, start=1):
             df = load_file(file)
             if df is not None:
                 data_frames.append(df)
                 file_names.append(file.name)
                 st.sidebar.success(f"✅ Loaded `{file.name}` successfully!")
+        st.session_state['data_frames'] = data_frames
+        st.session_state['file_names'] = file_names
     
     # Remove duplicates within datasets
-    data_frames = remove_duplicates(data_frames, 'PROLIFIC_PID')  # Assuming 'PROLIFIC_PID' is the primary key
+    primary_key_placeholder = st.sidebar.empty()
+    primary_key_placeholder.info("Please specify the primary key below.")
     
     # Preview uploaded datasets
     if data_frames:
         st.sidebar.info(f"📥 {len(data_frames)} dataset(s) uploaded.")
         with st.expander("🔍 View Uploaded Datasets"):
-            for i, df in enumerate(data_frames):
-                st.write(f"### Dataset {i+1}: `{file_names[i]}`")
+            for i, df in enumerate(data_frames, start=1):
+                st.write(f"### Dataset {i}: `{file_names[i-1]}`")
                 st.dataframe(df.head())
-else:
-    st.sidebar.info("Please upload one or more datasets to begin.")
 
-# If datasets are uploaded, show merge options
-if data_frames:
-    st.sidebar.header("🔧 Merge Options")
-    
-    # Select primary key
-    primary_key = st.sidebar.selectbox(
-        "🔑 Select Primary Key (Unique Case ID):",
-        options=data_frames[0].columns
-    )
-    
-    # Advanced Validation: Check if all datasets contain the primary key
+# Primary Key Input
+st.sidebar.header("🔑 Primary Key Selection")
+primary_key = st.sidebar.text_input("Enter Primary Key (Unique Case ID):", "")
+if primary_key:
+    # Validate primary key presence in all datasets
     missing_pk = []
-    for i, df in enumerate(data_frames, start=1):
+    for i, df in enumerate(st.session_state['data_frames'], start=1):
         if primary_key not in df.columns:
             missing_pk.append(i)
-    
     if missing_pk:
-        st.sidebar.error(f"🚨 The primary key `{primary_key}` is missing in dataset(s): {missing_pk}. Please choose a different primary key or ensure all datasets contain it.")
+        st.sidebar.error(f"🚨 The primary key `{primary_key}` is missing in dataset(s): {missing_pk}. Please choose a different primary key.")
     else:
-        # Check data type consistency for primary key
-        pk_types = [df[primary_key].dtype for df in data_frames]
+        # Check data type consistency
+        pk_types = [df[primary_key].dtype for df in st.session_state['data_frames']]
         if len(set(pk_types)) > 1:
             st.sidebar.error("🚨 Inconsistent data types for the primary key across datasets. Please ensure all primary keys have the same data type.")
         else:
-            # Choose merge type
+            # Remove duplicates if any
+            st.session_state['data_frames'] = remove_duplicates(st.session_state['data_frames'], primary_key)
+            
+            # Merge Options
+            st.sidebar.header("🔀 Merge Options")
             merge_type = st.sidebar.radio(
-                "🔀 Choose Merge Type:",
+                "Choose Merge Type:",
                 options=["Wide (Horizontal)", "Long (Vertical)"]
             )
             
@@ -152,42 +190,78 @@ if data_frames:
             else:
                 join_type = None  # Not applicable for long merge
             
-            # Option for data cleaning (optional)
+            # Optional Data Cleaning
             st.sidebar.header("🧹 Data Cleaning Options")
             fill_missing = st.sidebar.checkbox("Fill Missing Values")
             if fill_missing:
                 fill_value = st.sidebar.text_input("Fill with (e.g., 0, 'Unknown'):", value="0")
-                for i in range(len(data_frames)):
-                    data_frames[i] = data_frames[i].fillna(fill_value)
-                st.sidebar.success("✅ Missing values filled successfully.")
+                if fill_value:
+                    for i in range(len(st.session_state['data_frames'])):
+                        st.session_state['data_frames'][i] = st.session_state['data_frames'][i].fillna(fill_value)
+                    st.sidebar.success("✅ Missing values filled successfully.")
             
-            # Merge datasets button
+            # Merge Datasets Button
             if st.sidebar.button("🚀 Merge Datasets"):
                 with st.spinner('Merging datasets...'):
                     try:
                         if merge_type == "Wide (Horizontal)":
-                            # Perform wide merge with selected join type
-                            merged_df = merge_datasets_wide(data_frames, primary_key, join_type)
+                            # Perform wide merge
+                            merged_df = merge_datasets_wide(
+                                st.session_state['data_frames'],
+                                primary_key,
+                                join_type,
+                                st.session_state['wave_assignments']
+                            )
+                            st.session_state['merge_type'] = merge_type
+                            st.session_state['merged_df'] = merged_df
+                            
+                            st.success(f"✅ Datasets merged successfully ({merge_type} with {join_type} join).")
+                            
+                            # Display summary statistics
+                            st.write("### 📈 Summary Statistics (Wide Merge)")
+                            st.write(f"**Number of Instances:** {merged_df.shape[0]}")
                             
                         elif merge_type == "Long (Vertical)":
-                            merged_df, common_ids_count = merge_datasets_long(data_frames, primary_key)
+                            # Perform long merge
+                            merged_df, common_ids_count = merge_datasets_long(
+                                st.session_state['data_frames'],
+                                primary_key,
+                                st.session_state['wave_assignments']
+                            )
+                            st.session_state['merge_type'] = merge_type
+                            st.session_state['merged_df'] = merged_df
                             
-                        # Display merged dataset
-                        if merge_type == "Long (Vertical)":
-                            expected_rows = common_ids_count * len(data_frames)
-                            actual_rows = len(merged_df)
+                            # Calculate expected and actual rows
+                            expected_rows = common_ids_count * len(st.session_state['data_frames'])
+                            actual_rows = merged_df.shape[0]
                             if actual_rows != expected_rows:
-                                st.warning(f"⚠️ Expected {expected_rows} rows (for {common_ids_count} cases across {len(data_frames)} waves), but got {actual_rows} rows.")
+                                st.warning(f"⚠️ Expected {expected_rows} rows (for {common_ids_count} cases across {len(st.session_state['data_frames'])} waves), but got {actual_rows} rows.")
                             else:
                                 st.success(f"✅ Datasets merged successfully ({merge_type}).")
-                        else:
-                            st.success(f"✅ Datasets merged successfully ({merge_type} with {join_type} join).")
+                            
+                            # Display summary statistics
+                            st.write("### 📈 Summary Statistics (Long Merge)")
+                            st.write(f"**Total Number of Instances:** {merged_df.shape[0]}")
+                            st.write("**Number of Instances per Wave:**")
+                            st.write(merged_df['Wave'].value_counts())
                         
+                        # Display merged dataset preview
                         st.write("### 📄 Merged Dataset Preview")
-                        st.dataframe(merged_df.head())
+                        st.dataframe(st.session_state['merged_df'].head())
+                        
+                        # Summary of Missing Values
+                        st.write("### 🧩 Missing Values Summary")
+                        missing_summary = st.session_state['merged_df'].isnull().sum().sort_values(ascending=False)
+                        st.write(missing_summary)
+                        
+                        # Visualize missing values
+                        st.write("#### 📊 Missing Values Visualization")
+                        plt.figure(figsize=(12, 8))
+                        sns.heatmap(st.session_state['merged_df'].isnull(), cbar=False, cmap='viridis')
+                        st.pyplot(plt)
                         
                         # Allow user to download merged dataset
-                        csv = merged_df.to_csv(index=False).encode("utf-8")
+                        csv = st.session_state['merged_df'].to_csv(index=False).encode("utf-8")
                         st.download_button(
                             label="💾 Download Merged Dataset",
                             data=csv,
