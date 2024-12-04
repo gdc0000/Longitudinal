@@ -1,99 +1,112 @@
 import streamlit as st
 import pandas as pd
-from io import StringIO
+import pyreadstat
 from functools import reduce
 
-# Title and Description
+# Title and description
 st.title("Longitudinal Data Merger")
 st.write("""
-This app allows you to merge multiple longitudinal datasets either in a wide (horizontal) or long (vertical) format.
+This app allows you to merge multiple longitudinal datasets in **Wide** (horizontal) or **Long** (vertical) format. 
+It supports **CSV**, **Excel**, and **SPSS (.sav)** files.
 """)
 
-# Sidebar for user inputs
+# Sidebar for uploading datasets
 st.sidebar.header("Upload Datasets")
-uploaded_files = st.sidebar.file_uploader("Choose CSV files", type=["csv"], accept_multiple_files=True)
+uploaded_files = st.sidebar.file_uploader(
+    "Upload your datasets (CSV, Excel, or SPSS):",
+    type=["csv", "xlsx", "sav"],
+    accept_multiple_files=True
+)
 
+# Function to read files based on their format
+def read_file(file):
+    try:
+        if file.name.endswith(".csv"):
+            return pd.read_csv(file)
+        elif file.name.endswith(".xlsx"):
+            return pd.read_excel(file)
+        elif file.name.endswith(".sav"):
+            df, _ = pyreadstat.read_sav(file)
+            return df
+        else:
+            raise ValueError("Unsupported file type")
+    except Exception as e:
+        st.error(f"Error reading file `{file.name}`: {e}")
+        return None
+
+# Process uploaded files
+data_frames = []
 if uploaded_files:
-    data_frames = []
-    file_names = []
-    for uploaded_file in uploaded_files:
-        try:
-            df = pd.read_csv(uploaded_file)
+    for file in uploaded_files:
+        df = read_file(file)
+        if df is not None:
             data_frames.append(df)
-            file_names.append(uploaded_file.name)
-            st.sidebar.success(f"Uploaded `{uploaded_file.name}` successfully.")
-        except Exception as e:
-            st.sidebar.error(f"Error loading `{uploaded_file.name}`: {e}")
+            st.sidebar.success(f"File `{file.name}` loaded successfully!")
 
     if data_frames:
-        st.header("Uploaded Datasets")
-        for i, df in enumerate(data_frames):
-            st.subheader(f"Dataset {i+1}: {file_names[i]}")
-            st.dataframe(df.head())
+        st.sidebar.info(f"{len(data_frames)} datasets loaded.")
+    else:
+        st.sidebar.warning("No valid datasets uploaded.")
 
-        # Select Primary Key
-        st.sidebar.header("Merge Settings")
-        primary_key = st.sidebar.selectbox(
-            "Select Primary Key (Unique Case ID)",
-            options=data_frames[0].columns.tolist()
-        )
+# If datasets are loaded, ask for further options
+if data_frames:
+    st.sidebar.header("Merge Options")
 
-        # Select Merge Type
-        merge_type = st.sidebar.selectbox(
-            "Select Merge Type",
-            options=["Wide (Horizontal Merge)", "Long (Vertical Merge)"]
-        )
+    # Select primary key
+    primary_key = st.sidebar.selectbox(
+        "Select Primary Key (Unique Case ID):",
+        options=data_frames[0].columns
+    )
 
-        if st.sidebar.button("Merge Datasets"):
-            try:
-                if merge_type == "Wide (Horizontal Merge)":
-                    # Perform wide merge (inner join on primary key)
-                    merged_df = reduce(lambda left, right: pd.merge(left, right, on=primary_key, how='inner', suffixes=('', '_dup')), data_frames)
-                    
-                    # Identify duplicate columns and rename them with prefix
-                    cols = merged_df.columns.tolist()
-                    new_cols = {}
-                    for df_idx, col in enumerate(data_frames):
-                        suffix = f"_w{df_idx+1}"
-                        for column in col.columns:
-                            if column != primary_key:
-                                new_col = f"{column}{suffix}"
-                                new_cols[column] = new_col
-                    merged_df.rename(columns=new_cols, inplace=True)
-                    
-                    st.success("Datasets merged successfully (Wide format).")
-                    st.dataframe(merged_df.head())
+    # Select merge type
+    merge_type = st.sidebar.radio(
+        "Choose Merge Type:",
+        options=["Wide (Horizontal)", "Long (Vertical)"]
+    )
 
-                else:
-                    # Perform long merge (append) with a new wave identifier
-                    merged_df = pd.DataFrame()
-                    for idx, df in enumerate(data_frames):
-                        temp_df = df.copy()
-                        temp_df['wave'] = f"w{idx+1}"
-                        merged_df = pd.concat([merged_df, temp_df], axis=0, ignore_index=True)
-                    
-                    # Perform inner join to keep only common primary keys
-                    common_ids = set.intersection(*(set(df[primary_key]) for df in data_frames))
-                    merged_df = merged_df[merged_df[primary_key].isin(common_ids)]
-                    
-                    st.success("Datasets merged successfully (Long format).")
-                    st.dataframe(merged_df.head())
-
-                # Option to download the merged dataset
-                csv = merged_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Merged Dataset as CSV",
-                    data=csv,
-                    file_name='merged_dataset.csv',
-                    mime='text/csv',
+    # Merge datasets button
+    if st.sidebar.button("Merge Datasets"):
+        try:
+            # Wide merge
+            if merge_type == "Wide (Horizontal)":
+                merged_df = reduce(
+                    lambda left, right: pd.merge(left, right, on=primary_key, how="inner"),
+                    data_frames
                 )
+                # Rename columns with wave-specific suffixes
+                for i, df in enumerate(data_frames, start=1):
+                    suffix = f"_w{i}"
+                    for col in df.columns:
+                        if col != primary_key and col in merged_df.columns:
+                            merged_df.rename(columns={col: f"{col}{suffix}"}, inplace=True)
 
-            except Exception as e:
-                st.error(f"An error occurred during merging: {e}")
-else:
-    st.info("Please upload one or more CSV files to begin.")
+            # Long merge
+            elif merge_type == "Long (Vertical)":
+                merged_df = pd.concat(
+                    [df.assign(wave=f"w{i+1}") for i, df in enumerate(data_frames)],
+                    ignore_index=True
+                )
+                # Retain only rows with common primary keys
+                common_ids = set.intersection(*(set(df[primary_key]) for df in data_frames))
+                merged_df = merged_df[merged_df[primary_key].isin(common_ids)]
 
-# Professional References
+            # Display merged dataset
+            st.success(f"Datasets merged successfully ({merge_type}).")
+            st.write("Preview of Merged Dataset:")
+            st.dataframe(merged_df.head())
+
+            # Allow user to download merged dataset
+            csv = merged_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Merged Dataset",
+                data=csv,
+                file_name="merged_dataset.csv",
+                mime="text/csv"
+            )
+        except Exception as e:
+            st.error(f"Error during merging: {e}")
+
+# Footer with professional references
 st.markdown("---")
 st.markdown("### **Dr. Gabriele Di Cicco, PhD in Social Psychology**")
 st.markdown("""
