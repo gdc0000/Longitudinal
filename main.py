@@ -8,44 +8,48 @@ from functools import reduce
 def load_file(file):
     try:
         if file.name.endswith(".csv"):
-            return pd.read_csv(file)
+            df = pd.read_csv(file)
         elif file.name.endswith(".xlsx"):
-            return pd.read_excel(file, engine="openpyxl")
+            df = pd.read_excel(file, engine="openpyxl")
         elif file.name.endswith(".sav"):
             df, _ = pyreadstat.read_sav(file)
-            return df
         else:
             raise ValueError(f"Unsupported file format: {file.name}")
+        
+        # Strip leading/trailing spaces from column names
+        df.columns = df.columns.str.strip()
+        return df
     except Exception as e:
         st.error(f"Error loading file `{file.name}`: {e}")
         return None
 
-# Caching the merge function
+# Caching the merge function for wide merge
 @st.cache_data
-def merge_datasets_wide(data_frames, primary_key):
+def merge_datasets_wide(data_frames, primary_key, join_type):
     renamed_dfs = []
     for i, df in enumerate(data_frames, start=1):
         df_renamed = df.copy()
         suffix = f"_w{i}"
-        # Rename columns except primary key
+        # Rename columns except primary key with wave-specific suffixes
         new_columns = {
-            col: f"{col}{suffix}" if col != primary_key else col for col in df.columns
+            col: f"{col}{suffix}" if col != primary_key else col for col in df_renamed.columns
         }
         df_renamed.rename(columns=new_columns, inplace=True)
         renamed_dfs.append(df_renamed)
     
     # Perform inner join across all dataframes
     merged_df = reduce(
-        lambda left, right: pd.merge(left, right, on=primary_key, how="inner"),
+        lambda left, right: pd.merge(left, right, on=primary_key, how=join_type),
         renamed_dfs
     )
     return merged_df
 
+# Caching the merge function for long merge
 @st.cache_data
 def merge_datasets_long(data_frames, primary_key):
-    # Add 'wave' identifier and ensure primary key consistency
+    # Add 'Wave' identifier to each dataframe
     for i, df in enumerate(data_frames, start=1):
-        df['wave'] = f"w{i}"
+        df['Wave'] = f"w{i}"
     
     # Concatenate all dataframes vertically
     concatenated_df = pd.concat(data_frames, ignore_index=True)
@@ -56,7 +60,17 @@ def merge_datasets_long(data_frames, primary_key):
     # Filter to retain only common primary keys
     merged_df = concatenated_df[concatenated_df[primary_key].isin(common_ids)]
     
-    return merged_df
+    return merged_df, len(common_ids)
+
+# Function to remove duplicate primary keys within each dataset
+def remove_duplicates(data_frames, primary_key):
+    cleaned_dfs = []
+    for i, df in enumerate(data_frames, start=1):
+        if df.duplicated(subset=[primary_key]).any():
+            st.warning(f"⚠️ Dataset {i} contains duplicate `{primary_key}` entries. Duplicates will be removed.")
+            df = df.drop_duplicates(subset=[primary_key])
+        cleaned_dfs.append(df)
+    return cleaned_dfs
 
 # App title and description
 st.title("📊 Longitudinal Data Merger")
@@ -84,6 +98,9 @@ if uploaded_files:
                 data_frames.append(df)
                 file_names.append(file.name)
                 st.sidebar.success(f"✅ Loaded `{file.name}` successfully!")
+    
+    # Remove duplicates within datasets
+    data_frames = remove_duplicates(data_frames, 'PROLIFIC_PID')  # Assuming 'PROLIFIC_PID' is the primary key
     
     # Preview uploaded datasets
     if data_frames:
@@ -114,73 +131,72 @@ if data_frames:
     if missing_pk:
         st.sidebar.error(f"🚨 The primary key `{primary_key}` is missing in dataset(s): {missing_pk}. Please choose a different primary key or ensure all datasets contain it.")
     else:
-        # Choose merge type
-        merge_type = st.sidebar.radio(
-            "🔀 Choose Merge Type:",
-            options=["Wide (Horizontal)", "Long (Vertical)"]
-        )
-        
-        # Choose join type (only for Wide merge)
-        if merge_type == "Wide (Horizontal)":
-            join_type = st.sidebar.selectbox(
-                "🔗 Select Join Type:",
-                options=["inner", "left", "right", "outer"]
-            )
+        # Check data type consistency for primary key
+        pk_types = [df[primary_key].dtype for df in data_frames]
+        if len(set(pk_types)) > 1:
+            st.sidebar.error("🚨 Inconsistent data types for the primary key across datasets. Please ensure all primary keys have the same data type.")
         else:
-            join_type = None  # Not applicable for long merge
-        
-        # Merge datasets button
-        if st.sidebar.button("🚀 Merge Datasets"):
-            with st.spinner('Merging datasets...'):
-                try:
-                    if merge_type == "Wide (Horizontal)":
-                        # Perform wide merge with selected join type
-                        renamed_dfs = []
-                        for i, df in enumerate(data_frames, start=1):
-                            df_renamed = df.copy()
-                            suffix = f"_w{i}"
-                            new_columns = {
-                                col: f"{col}{suffix}" if col != primary_key else col for col in df.columns
-                            }
-                            df_renamed.rename(columns=new_columns, inplace=True)
-                            renamed_dfs.append(df_renamed)
+            # Choose merge type
+            merge_type = st.sidebar.radio(
+                "🔀 Choose Merge Type:",
+                options=["Wide (Horizontal)", "Long (Vertical)"]
+            )
+            
+            # For Wide merge, choose join type
+            if merge_type == "Wide (Horizontal)":
+                join_type = st.sidebar.selectbox(
+                    "🔗 Select Join Type:",
+                    options=["inner", "left", "right", "outer"],
+                    index=0  # default to 'inner'
+                )
+            else:
+                join_type = None  # Not applicable for long merge
+            
+            # Option for data cleaning (optional)
+            st.sidebar.header("🧹 Data Cleaning Options")
+            fill_missing = st.sidebar.checkbox("Fill Missing Values")
+            if fill_missing:
+                fill_value = st.sidebar.text_input("Fill with (e.g., 0, 'Unknown'):", value="0")
+                for i in range(len(data_frames)):
+                    data_frames[i] = data_frames[i].fillna(fill_value)
+                st.sidebar.success("✅ Missing values filled successfully.")
+            
+            # Merge datasets button
+            if st.sidebar.button("🚀 Merge Datasets"):
+                with st.spinner('Merging datasets...'):
+                    try:
+                        if merge_type == "Wide (Horizontal)":
+                            # Perform wide merge with selected join type
+                            merged_df = merge_datasets_wide(data_frames, primary_key, join_type)
+                            
+                        elif merge_type == "Long (Vertical)":
+                            merged_df, common_ids_count = merge_datasets_long(data_frames, primary_key)
+                            
+                        # Display merged dataset
+                        if merge_type == "Long (Vertical)":
+                            expected_rows = common_ids_count * len(data_frames)
+                            actual_rows = len(merged_df)
+                            if actual_rows != expected_rows:
+                                st.warning(f"⚠️ Expected {expected_rows} rows (for {common_ids_count} cases across {len(data_frames)} waves), but got {actual_rows} rows.")
+                            else:
+                                st.success(f"✅ Datasets merged successfully ({merge_type}).")
+                        else:
+                            st.success(f"✅ Datasets merged successfully ({merge_type} with {join_type} join).")
                         
-                        merged_df = reduce(
-                            lambda left, right: pd.merge(left, right, on=primary_key, how=join_type),
-                            renamed_dfs
+                        st.write("### 📄 Merged Dataset Preview")
+                        st.dataframe(merged_df.head())
+                        
+                        # Allow user to download merged dataset
+                        csv = merged_df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label="💾 Download Merged Dataset",
+                            data=csv,
+                            file_name="merged_dataset.csv",
+                            mime="text/csv"
                         )
                     
-                    elif merge_type == "Long (Vertical)":
-                        merged_df = merge_datasets_long(data_frames, primary_key)
-                    
-                    # Validation: Ensure inner join behavior for long merge
-                    if merge_type == "Long (Vertical)":
-                        expected_rows = len(common_ids := set.intersection(*(set(df[primary_key]) for df in data_frames)))
-                        actual_rows = len(merged_df)
-                        expected_total = expected_rows * len(data_frames)
-                        if actual_rows != expected_total:
-                            st.warning(f"⚠️ Expected {expected_total} rows (for {expected_rows} cases across {len(data_frames)} waves), but got {actual_rows} rows.")
-                        else:
-                            st.success(f"✅ Datasets merged successfully ({merge_type}).")
-                    
-                    else:
-                        st.success(f"✅ Datasets merged successfully ({merge_type} with {join_type} join).")
-                    
-                    # Display merged dataset
-                    st.write("### 📄 Merged Dataset Preview")
-                    st.dataframe(merged_df.head())
-                    
-                    # Allow user to download merged dataset
-                    csv = merged_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="💾 Download Merged Dataset",
-                        data=csv,
-                        file_name="merged_dataset.csv",
-                        mime="text/csv"
-                    )
-                
-                except Exception as e:
-                    st.error(f"❌ Error during merging: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Error during merging: {e}")
 
 # Footer with professional references
 st.markdown("---")
