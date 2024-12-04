@@ -3,14 +3,14 @@ import pandas as pd
 import pyreadstat
 from functools import reduce
 
-# Title and description
+# App title and description
 st.title("Longitudinal Data Merger")
 st.write("""
-This app allows you to merge multiple longitudinal datasets in **Wide** (horizontal) or **Long** (vertical) format. 
-It supports **CSV**, **Excel**, and **SPSS (.sav)** files.
+This app allows you to merge multiple longitudinal datasets in **Wide** (horizontal) or **Long** (vertical) format.  
+Supported file formats: **CSV**, **Excel (.xlsx)**, and **SPSS (.sav)**.
 """)
 
-# Sidebar for uploading datasets
+# Sidebar for file upload
 st.sidebar.header("Upload Datasets")
 uploaded_files = st.sidebar.file_uploader(
     "Upload your datasets (CSV, Excel, or SPSS):",
@@ -18,37 +18,39 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-# Function to read files based on their format
-def read_file(file):
+# Function to load files based on format
+def load_file(file):
     try:
         if file.name.endswith(".csv"):
             return pd.read_csv(file)
         elif file.name.endswith(".xlsx"):
-            return pd.read_excel(file)
+            return pd.read_excel(file, engine="openpyxl")
         elif file.name.endswith(".sav"):
             df, _ = pyreadstat.read_sav(file)
             return df
         else:
-            raise ValueError("Unsupported file type")
+            raise ValueError(f"Unsupported file format: {file.name}")
     except Exception as e:
-        st.error(f"Error reading file `{file.name}`: {e}")
+        st.error(f"Error loading file `{file.name}`: {e}")
         return None
 
-# Process uploaded files
+# Load datasets
 data_frames = []
 if uploaded_files:
     for file in uploaded_files:
-        df = read_file(file)
+        df = load_file(file)
         if df is not None:
             data_frames.append(df)
-            st.sidebar.success(f"File `{file.name}` loaded successfully!")
+            st.sidebar.success(f"Loaded `{file.name}` successfully!")
 
+    # Preview uploaded datasets
     if data_frames:
         st.sidebar.info(f"{len(data_frames)} datasets loaded.")
-    else:
-        st.sidebar.warning("No valid datasets uploaded.")
+        for i, df in enumerate(data_frames):
+            st.write(f"### Dataset {i+1}")
+            st.dataframe(df.head())
 
-# If datasets are loaded, ask for further options
+# If datasets are uploaded, show merge options
 if data_frames:
     st.sidebar.header("Merge Options")
 
@@ -58,16 +60,16 @@ if data_frames:
         options=data_frames[0].columns
     )
 
-    # Select merge type
+    # Choose merge type
     merge_type = st.sidebar.radio(
         "Choose Merge Type:",
         options=["Wide (Horizontal)", "Long (Vertical)"]
     )
 
-    # Merge datasets button
+    # Merge button
     if st.sidebar.button("Merge Datasets"):
         try:
-            # Wide merge
+            # Perform wide merge
             if merge_type == "Wide (Horizontal)":
                 merged_df = reduce(
                     lambda left, right: pd.merge(left, right, on=primary_key, how="inner"),
@@ -80,7 +82,7 @@ if data_frames:
                         if col != primary_key and col in merged_df.columns:
                             merged_df.rename(columns={col: f"{col}{suffix}"}, inplace=True)
 
-            # Long merge
+            # Perform long merge
             elif merge_type == "Long (Vertical)":
                 merged_df = pd.concat(
                     [df.assign(wave=f"w{i+1}") for i, df in enumerate(data_frames)],
@@ -92,10 +94,10 @@ if data_frames:
 
             # Display merged dataset
             st.success(f"Datasets merged successfully ({merge_type}).")
-            st.write("Preview of Merged Dataset:")
+            st.write("### Merged Dataset Preview")
             st.dataframe(merged_df.head())
 
-            # Allow user to download merged dataset
+            # Download button
             csv = merged_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Merged Dataset",
