@@ -4,3 +4,4 @@ pyreadstat
 openpyxl
 matplotlib
 seaborn
+pytest
